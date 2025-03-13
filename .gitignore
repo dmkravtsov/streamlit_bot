@@ -31,6 +31,8 @@ ENV/
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Streamlit
 .streamlit/secrets.toml
@@ -38,3 +40,6 @@ ENV/
 # FAISS
 *.faiss
 *.pkl
+
+# ChromaDB
+chroma_db/

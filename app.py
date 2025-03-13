@@ -111,10 +111,16 @@ def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocumen
 def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
     """Create Chroma vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
+    # Create a persistent directory for ChromaDB
+    persist_directory = os.path.join(os.getcwd(), "chroma_db")
+    os.makedirs(persist_directory, exist_ok=True)
+    
     vectorstore = Chroma.from_documents(
         documents=text_chunks,
-        embedding=embeddings
+        embedding=embeddings,
+        persist_directory=persist_directory
     )
+    vectorstore.persist()  # Save the database to disk
     return vectorstore
 
 def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
@@ -183,6 +189,8 @@ def main():
         st.session_state.debug_info = []
     if 'processed_docs' not in st.session_state:
         st.session_state.processed_docs = []
+    if 'vectorstore' not in st.session_state:
+        st.session_state.vectorstore = None
 
     try:
         st.set_page_config(page_title="Chat with Documents")
@@ -199,75 +207,54 @@ def main():
             
             # Show system info
             with st.expander("Debug Information"):
-                st.write("Python version:", sys.version)
-                st.write("OpenAI API Key status:", "Set" if check_openai_key() else "Not Set")
-                st.write("Working Directory:", os.getcwd())
-                if st.session_state.processed_docs:
-                    st.write("Processed Documents:")
-                    for doc in st.session_state.processed_docs:
-                        st.write(f"- {doc}")
-                if st.session_state.debug_info:
-                    st.write("Debug Log:")
-                    for info in st.session_state.debug_info:
-                        st.write(f"- {info}")
+                st.write("System Info:")
+                st.write(f"- Python version: {sys.version}")
+                st.write(f"- Working directory: {os.getcwd()}")
+                st.write("Recent Actions:")
+                for info in st.session_state.debug_info:
+                    st.write(info)
+
+        # Process documents when uploaded
+        if docs:
+            with st.spinner("Processing documents..."):
+                # Process new documents
+                documents = process_documents(docs)
+                chunks = get_text_chunks(documents)
+                
+                # Create or update vectorstore
+                if not st.session_state.vectorstore:
+                    st.session_state.vectorstore = get_vectorstore(chunks)
+                    st.session_state.debug_info.append("Created new vectorstore")
+                else:
+                    # Add new documents to existing vectorstore
+                    st.session_state.vectorstore.add_documents(chunks)
+                    st.session_state.vectorstore.persist()
+                    st.session_state.debug_info.append("Updated existing vectorstore")
+                
+                # Create conversation chain
+                st.session_state.conversation = get_conversation_chain(st.session_state.vectorstore)
+                st.session_state.processed_docs.extend([doc.name for doc in docs])
+                st.success("Documents processed successfully!")
+
+        # Show chat interface
+        if st.session_state.conversation is not None:
+            if st.session_state.processed_docs:
+                st.write("Processed documents:", ", ".join(st.session_state.processed_docs))
             
-            if st.button("Process"):
-                if not check_openai_key():
-                    st.error("Please set your OpenAI API key first!")
-                    return
-                    
-                if not docs:
-                    st.warning("Please upload some documents first!")
-                    return
-                    
-                with st.spinner("Processing and translating documents..."):
-                    try:
-                        # Process documents
-                        documents = process_documents(docs)
-                        st.session_state.processed_docs = [doc.metadata['source'] for doc in documents]
-                        st.session_state.debug_info.append(f"Processed {len(documents)} documents")
-
-                        # Get text chunks
-                        text_chunks = get_text_chunks(documents)
-                        st.session_state.debug_info.append(f"Created {len(text_chunks)} text chunks")
-
-                        # Create vector store
-                        vectorstore = get_vectorstore(text_chunks)
-                        st.session_state.debug_info.append("Vector store created successfully")
-
-                        # Create conversation chain
-                        st.session_state.conversation = get_conversation_chain(vectorstore)
-                        st.session_state.debug_info.append("Conversation chain initialized")
-                        
-                        st.success("Done! You can now chat with your documents!")
-                    except Exception as e:
-                        st.error(f"Error during processing: {str(e)}")
-                        st.session_state.debug_info.append(f"Error: {str(e)}")
-
-        if st.session_state.conversation:
             user_question = st.text_input("Ask a question about your documents:")
-            
             if user_question:
                 with st.spinner("Thinking..."):
-                    try:
-                        with get_openai_callback() as cb:
-                            response = st.session_state.conversation({
-                                'question': user_question
-                            })
-                            st.write(response['answer'])
-                            
-                            with st.expander("Token Usage Info"):
-                                st.write(f"Total Tokens: {cb.total_tokens}")
-                                st.write(f"Prompt Tokens: {cb.prompt_tokens}")
-                                st.write(f"Completion Tokens: {cb.completion_tokens}")
-                                st.write(f"Total Cost (USD): ${cb.total_cost}")
-                    except Exception as e:
-                        st.error(f"Error during question processing: {str(e)}")
-                        st.session_state.debug_info.append(f"Question Error: {str(e)}")
-    
+                    with get_openai_callback() as cb:
+                        response = st.session_state.conversation({
+                            'question': user_question
+                        })
+                        st.session_state.debug_info.append(f"Tokens used: {cb.total_tokens} (${cb.total_cost:.4f})")
+                    
+                    st.write("Answer:", response['answer'])
+
     except Exception as e:
-        st.error(f"Application Error: {str(e)}")
-        st.session_state.debug_info.append(f"App Error: {str(e)}")
+        st.error(f"An error occurred: {str(e)}")
+        st.session_state.debug_info.append(f"Error: {str(e)}")
 
 if __name__ == '__main__':
     main()
