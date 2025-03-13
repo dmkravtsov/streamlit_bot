@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import sys
+import tempfile
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
@@ -111,17 +112,16 @@ def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocumen
 def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
     """Create Chroma vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
-    # Create a persistent directory for ChromaDB
-    persist_directory = os.path.join(os.getcwd(), "chroma_db")
-    os.makedirs(persist_directory, exist_ok=True)
     
-    vectorstore = Chroma.from_documents(
-        documents=text_chunks,
-        embedding=embeddings,
-        persist_directory=persist_directory
-    )
-    vectorstore.persist()  # Save the database to disk
-    return vectorstore
+    # Use a temporary directory for ChromaDB that will be cleaned up automatically
+    with tempfile.TemporaryDirectory() as persist_directory:
+        vectorstore = Chroma.from_documents(
+            documents=text_chunks,
+            embedding=embeddings,
+            persist_directory=persist_directory
+        )
+        vectorstore.persist()  # Save the database to disk
+        return vectorstore
 
 def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
@@ -198,63 +198,71 @@ def main():
         
         # Add debug info section in sidebar
         with st.sidebar:
+            st.subheader("Debug Information")
+            st.text(f"Python version: {sys.version}")
+            st.text(f"Working directory: {os.getcwd()}")
+            if st.session_state.debug_info:
+                for info in st.session_state.debug_info:
+                    st.text(info)
+            
             st.subheader("Your documents")
-            docs = st.file_uploader(
-                "Upload your PDFs or DOCX files here", 
+            uploaded_files = st.file_uploader(
+                "Upload your PDFs/DOCXs here",
                 accept_multiple_files=True,
                 type=['pdf', 'docx']
             )
-            
-            # Show system info
-            with st.expander("Debug Information"):
-                st.write("System Info:")
-                st.write(f"- Python version: {sys.version}")
-                st.write(f"- Working directory: {os.getcwd()}")
-                st.write("Recent Actions:")
-                for info in st.session_state.debug_info:
-                    st.write(info)
 
-        # Process documents when uploaded
-        if docs:
-            with st.spinner("Processing documents..."):
-                # Process new documents
-                documents = process_documents(docs)
-                chunks = get_text_chunks(documents)
+            if uploaded_files:
+                st.session_state.debug_info = []  # Clear previous debug info
                 
-                # Create or update vectorstore
-                if not st.session_state.vectorstore:
-                    st.session_state.vectorstore = get_vectorstore(chunks)
-                    st.session_state.debug_info.append("Created new vectorstore")
-                else:
-                    # Add new documents to existing vectorstore
-                    st.session_state.vectorstore.add_documents(chunks)
-                    st.session_state.vectorstore.persist()
-                    st.session_state.debug_info.append("Updated existing vectorstore")
-                
-                # Create conversation chain
-                st.session_state.conversation = get_conversation_chain(st.session_state.vectorstore)
-                st.session_state.processed_docs.extend([doc.name for doc in docs])
-                st.success("Documents processed successfully!")
+                # Process documents
+                with st.spinner("Processing documents..."):
+                    try:
+                        documents = process_documents(uploaded_files)
+                        st.session_state.debug_info.append(f"Processed {len(documents)} documents")
+                        
+                        text_chunks = get_text_chunks(documents)
+                        st.session_state.debug_info.append(f"Created {len(text_chunks)} text chunks")
+                        
+                        vectorstore = get_vectorstore(text_chunks)
+                        st.session_state.vectorstore = vectorstore
+                        st.session_state.debug_info.append("Created vector store")
+                        
+                        # Create conversation chain
+                        st.session_state.conversation = get_conversation_chain(vectorstore)
+                        st.session_state.debug_info.append("Created conversation chain")
+                        
+                        st.success("Documents processed successfully!")
+                    except Exception as e:
+                        st.error(f"Error processing documents: {str(e)}")
+                        st.session_state.debug_info.append(f"Error: {str(e)}")
+                        return
 
-        # Show chat interface
+        # Chat interface
         if st.session_state.conversation is not None:
-            if st.session_state.processed_docs:
-                st.write("Processed documents:", ", ".join(st.session_state.processed_docs))
-            
             user_question = st.text_input("Ask a question about your documents:")
+            
             if user_question:
                 with st.spinner("Thinking..."):
                     with get_openai_callback() as cb:
-                        response = st.session_state.conversation({
-                            'question': user_question
-                        })
-                        st.session_state.debug_info.append(f"Tokens used: {cb.total_tokens} (${cb.total_cost:.4f})")
-                    
-                    st.write("Answer:", response['answer'])
+                        try:
+                            response = st.session_state.conversation({
+                                "question": user_question
+                            })
+                            st.write(response["answer"])
+                            
+                            # Display token usage
+                            st.sidebar.text(f"Tokens used: {cb.total_tokens}")
+                            st.sidebar.text(f"Cost: ${cb.total_cost:.4f}")
+                        except Exception as e:
+                            st.error(f"Error getting response: {str(e)}")
+                            st.session_state.debug_info.append(f"Error: {str(e)}")
+        else:
+            st.info("Upload documents to start chatting!")
 
     except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
-        st.session_state.debug_info.append(f"Error: {str(e)}")
+        st.error(f"Application error: {str(e)}")
+        st.session_state.debug_info.append(f"Fatal error: {str(e)}")
 
 if __name__ == '__main__':
     main()
