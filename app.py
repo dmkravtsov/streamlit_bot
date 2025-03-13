@@ -1,16 +1,13 @@
 import streamlit as st
 import os
 import sys
-import tempfile
-import uuid
-import sqlite3
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from docx import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma, FAISS
+from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
@@ -21,17 +18,11 @@ from deep_translator import GoogleTranslator
 
 def check_openai_key():
     """Check if OpenAI API key is set"""
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        st.error("⚠️ OpenAI API key not found. Please set it in your Streamlit secrets or .env file!")
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key or api_key == 'your_api_key_here':
+        st.error("⚠️ OpenAI API key not found. Please set it in the .env file!")
         return False
     return True
-
-def check_sqlite_version():
-    """Check if SQLite version meets ChromaDB requirements"""
-    sqlite_version = sqlite3.sqlite_version_info
-    required_version = (3, 35, 0)
-    return sqlite_version >= required_version
 
 def translate_text_batch(text: str, batch_size: int = 1000) -> str:
     """Translate text in batches while preserving context"""
@@ -101,8 +92,8 @@ def process_documents(docs) -> List[LangchainDocument]:
 def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocument]:
     """Split documents into chunks while preserving metadata"""
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=2000,
+        chunk_overlap=400,
         length_function=len,
         add_start_index=True,
     )
@@ -117,46 +108,41 @@ def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocumen
     
     return chunks
 
-def get_vectorstore(text_chunks: List[LangchainDocument]):
-    """Create vectorstore from document chunks"""
+def get_vectorstore(text_chunks: List[LangchainDocument]) -> FAISS:
+    """Create FAISS vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
-    
-    # Check SQLite version and use appropriate vector store
-    if check_sqlite_version():
-        st.session_state.debug_info.append("Using ChromaDB vector store")
-        # Use in-memory ChromaDB without persistence and with reduced dimension
-        vectorstore = Chroma.from_documents(
-            documents=text_chunks,
-            embedding=embeddings,
-            collection_metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 80, "hnsw:M": 8}
-        )
-    else:
-        st.session_state.debug_info.append("Using FAISS vector store (SQLite version < 3.35.0)")
-        # Use FAISS as fallback
-        vectorstore = FAISS.from_documents(
-            documents=text_chunks,
-            embedding=embeddings
-        )
+    vectorstore = FAISS.from_documents(
+        documents=text_chunks,
+        embedding=embeddings
+    )
     return vectorstore
 
-def get_conversation_chain(vectorstore) -> ConversationalRetrievalChain:
+def get_conversation_chain(vectorstore: FAISS) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
     llm = ChatOpenAI(
-        temperature=0.0,
-        model_name="gpt-3.5-turbo",
-        max_tokens=500
+        temperature=0.0,  # Set to 0 for fully factual responses
+        model_name="gpt-4"
     )
     
-    # Simplified prompt template
-    prompt_template = """Answer based on the context below. If you're unsure, say "I don't have enough information."
+    # Custom prompt template
+    prompt_template = """You are a helpful assistant that answers questions based solely on the provided context. 
+    
+    Context: {context}
+    
+    Current conversation:
+    {chat_history}
+    
+    Question: {question}
+    
+    Instructions:
+    1. Only answer with information found in the provided context
+    2. If information is not in the context, say "I don't have enough information to answer that question"
+    3. Keep responses clear, concise, and factual
+    4. Do not mention or reference any document names or sources
+    5. Structure responses logically, ensuring coherence and readability.
 
-Context: {context}
-
-Chat History: {chat_history}
-
-Question: {question}
-
-Answer:"""
+    
+    Answer:"""
     
     PROMPT = PromptTemplate(
         input_variables=["context", "chat_history", "question"],
@@ -166,18 +152,18 @@ Answer:"""
     memory = ConversationBufferMemory(
         memory_key='chat_history',
         return_messages=True,
-        output_key='answer',
-        max_token_limit=1000
+        output_key='answer'
     )
     
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 5}
+            search_type="similarity",
+            search_kwargs={"k": 5}  # Retrieve top 5 most relevant chunks
         ),
         memory=memory,
         combine_docs_chain_kwargs={"prompt": PROMPT},
-        return_source_documents=False
+        return_source_documents=False  # Disable source tracking
     )
     
     return conversation_chain
@@ -195,97 +181,91 @@ def main():
         st.session_state.debug_info = []
     if 'processed_docs' not in st.session_state:
         st.session_state.processed_docs = []
-    if 'vectorstore' not in st.session_state:
-        st.session_state.vectorstore = None
 
     try:
-        st.set_page_config(
-            page_title="Chat with Documents",
-            page_icon="💬",
-            layout="wide",
-            initial_sidebar_state="expanded"
-        )
+        st.set_page_config(page_title="Chat with Documents")
         st.header("Chat with your Documents 💬")
         
         # Add debug info section in sidebar
         with st.sidebar:
-            st.subheader("Debug Information")
-            st.text(f"Python version: {sys.version}")
-            st.text(f"Working directory: {os.getcwd()}")
-            if st.session_state.debug_info:
-                for info in st.session_state.debug_info:
-                    st.text(info)
-            
-            # Clear memory button
-            if st.button("Clear Memory"):
-                st.session_state.conversation = None
-                st.session_state.chat_history = None
-                st.session_state.vectorstore = None
-                st.session_state.debug_info = []
-                st.success("Memory cleared!")
-            
             st.subheader("Your documents")
-            uploaded_files = st.file_uploader(
-                "Upload your PDFs/DOCXs here",
+            docs = st.file_uploader(
+                "Upload your PDFs or DOCX files here", 
                 accept_multiple_files=True,
                 type=['pdf', 'docx']
             )
-
-            if uploaded_files:
-                st.session_state.debug_info = []  # Clear previous debug info
-                
-                # Process documents
-                with st.spinner("Processing documents..."):
+            
+            # Show system info
+            with st.expander("Debug Information"):
+                st.write("Python version:", sys.version)
+                st.write("OpenAI API Key status:", "Set" if check_openai_key() else "Not Set")
+                st.write("Working Directory:", os.getcwd())
+                if st.session_state.processed_docs:
+                    st.write("Processed Documents:")
+                    for doc in st.session_state.processed_docs:
+                        st.write(f"- {doc}")
+                if st.session_state.debug_info:
+                    st.write("Debug Log:")
+                    for info in st.session_state.debug_info:
+                        st.write(f"- {info}")
+            
+            if st.button("Process"):
+                if not check_openai_key():
+                    st.error("Please set your OpenAI API key first!")
+                    return
+                    
+                if not docs:
+                    st.warning("Please upload some documents first!")
+                    return
+                    
+                with st.spinner("Processing and translating documents..."):
                     try:
-                        # Clear previous conversation when new documents are uploaded
-                        st.session_state.conversation = None
-                        st.session_state.chat_history = None
-                        
-                        documents = process_documents(uploaded_files)
+                        # Process documents
+                        documents = process_documents(docs)
+                        st.session_state.processed_docs = [doc.metadata['source'] for doc in documents]
                         st.session_state.debug_info.append(f"Processed {len(documents)} documents")
-                        
+
+                        # Get text chunks
                         text_chunks = get_text_chunks(documents)
                         st.session_state.debug_info.append(f"Created {len(text_chunks)} text chunks")
-                        
+
+                        # Create vector store
                         vectorstore = get_vectorstore(text_chunks)
-                        st.session_state.vectorstore = vectorstore
-                        st.session_state.debug_info.append("Created vector store")
-                        
+                        st.session_state.debug_info.append("Vector store created successfully")
+
                         # Create conversation chain
                         st.session_state.conversation = get_conversation_chain(vectorstore)
-                        st.session_state.debug_info.append("Created conversation chain")
+                        st.session_state.debug_info.append("Conversation chain initialized")
                         
-                        st.success("Documents processed successfully!")
+                        st.success("Done! You can now chat with your documents!")
                     except Exception as e:
-                        st.error(f"Error processing documents: {str(e)}")
+                        st.error(f"Error during processing: {str(e)}")
                         st.session_state.debug_info.append(f"Error: {str(e)}")
-                        return
 
-        # Chat interface
-        if st.session_state.conversation is not None:
+        if st.session_state.conversation:
             user_question = st.text_input("Ask a question about your documents:")
             
             if user_question:
                 with st.spinner("Thinking..."):
-                    with get_openai_callback() as cb:
-                        try:
+                    try:
+                        with get_openai_callback() as cb:
                             response = st.session_state.conversation({
-                                "question": user_question
+                                'question': user_question
                             })
-                            st.write(response["answer"])
+                            st.write(response['answer'])
                             
-                            # Display token usage
-                            st.sidebar.text(f"Tokens used: {cb.total_tokens}")
-                            st.sidebar.text(f"Cost: ${cb.total_cost:.4f}")
-                        except Exception as e:
-                            st.error(f"Error getting response: {str(e)}")
-                            st.session_state.debug_info.append(f"Error: {str(e)}")
-        else:
-            st.info("Upload documents to start chatting!")
-
+                            with st.expander("Token Usage Info"):
+                                st.write(f"Total Tokens: {cb.total_tokens}")
+                                st.write(f"Prompt Tokens: {cb.prompt_tokens}")
+                                st.write(f"Completion Tokens: {cb.completion_tokens}")
+                                st.write(f"Total Cost (USD): ${cb.total_cost}")
+                    except Exception as e:
+                        st.error(f"Error during question processing: {str(e)}")
+                        st.session_state.debug_info.append(f"Question Error: {str(e)}")
+    
     except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        st.session_state.debug_info.append(f"Fatal error: {str(e)}")
+        st.error(f"Application Error: {str(e)}")
+        st.session_state.debug_info.append(f"App Error: {str(e)}")
 
 if __name__ == '__main__':
     main()
