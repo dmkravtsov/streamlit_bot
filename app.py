@@ -173,7 +173,7 @@ Answer:"""
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 3}
+            search_kwargs={"k": 5}
         ),
         memory=memory,
         combine_docs_chain_kwargs={"prompt": PROMPT},
