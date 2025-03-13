@@ -7,7 +7,7 @@ from PyPDF2 import PdfReader
 from docx import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
@@ -108,20 +108,20 @@ def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocumen
     
     return chunks
 
-def get_vectorstore(text_chunks: List[LangchainDocument]) -> FAISS:
-    """Create FAISS vectorstore from document chunks"""
+def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
+    """Create Chroma vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_documents(
+    vectorstore = Chroma.from_documents(
         documents=text_chunks,
         embedding=embeddings
     )
     return vectorstore
 
-def get_conversation_chain(vectorstore: FAISS) -> ConversationalRetrievalChain:
+def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
     llm = ChatOpenAI(
         temperature=0.0,  # Set to 0 for fully factual responses
-        model_name="gpt-4o"
+        model_name="gpt-4"
     )
     
     # Custom prompt template
@@ -139,8 +139,11 @@ def get_conversation_chain(vectorstore: FAISS) -> ConversationalRetrievalChain:
     2. If information is not in the context, say "I don't have enough information to answer that question"
     3. Keep responses clear, concise, and factual
     4. Do not mention or reference any document names or sources
-    5. Structure responses logically, ensuring coherence and readability.
-
+    5. Do not infer or assume information that is not explicitly stated in the context.
+    6. If the question requires interpretation or additional details not found in the context, state that you cannot provide an answer.
+    7. If multiple relevant facts exist in the context, summarize them objectively without adding personal opinions or assumptions.
+    8. Prioritize the most relevant and recent information if multiple similar details exist.
+    9. Structure responses logically, ensuring coherence and readability.
     
     Answer:"""
     
@@ -158,7 +161,6 @@ def get_conversation_chain(vectorstore: FAISS) -> ConversationalRetrievalChain:
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(
-            search_type="similarity",
             search_kwargs={"k": 5}  # Retrieve top 5 most relevant chunks
         ),
         memory=memory,
