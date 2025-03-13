@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import sys
 import tempfile
+import uuid
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
@@ -113,15 +114,26 @@ def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
     """Create Chroma vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
     
-    # Use a temporary directory for ChromaDB that will be cleaned up automatically
-    with tempfile.TemporaryDirectory() as persist_directory:
+    # Create a temporary directory with ASCII-only path
+    temp_base = os.path.join(tempfile.gettempdir(), "chromadb_" + str(uuid.uuid4())[:8])
+    os.makedirs(temp_base, exist_ok=True)
+    
+    try:
         vectorstore = Chroma.from_documents(
             documents=text_chunks,
             embedding=embeddings,
-            persist_directory=persist_directory
+            persist_directory=temp_base
         )
-        vectorstore.persist()  # Save the database to disk
+        vectorstore.persist()
         return vectorstore
+    except Exception as e:
+        if os.path.exists(temp_base):
+            try:
+                import shutil
+                shutil.rmtree(temp_base)
+            except:
+                pass
+        raise e
 
 def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
