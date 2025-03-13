@@ -20,9 +20,9 @@ from deep_translator import GoogleTranslator
 
 def check_openai_key():
     """Check if OpenAI API key is set"""
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key or api_key == 'your_api_key_here':
-        st.error("⚠️ OpenAI API key not found. Please set it in the .env file!")
+    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        st.error("⚠️ OpenAI API key not found. Please set it in your Streamlit secrets or .env file!")
         return False
     return True
 
@@ -94,8 +94,8 @@ def process_documents(docs) -> List[LangchainDocument]:
 def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocument]:
     """Split documents into chunks while preserving metadata"""
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=2000,
-        chunk_overlap=500,
+        chunk_size=1000,
+        chunk_overlap=200,
         length_function=len,
         add_start_index=True,
     )
@@ -114,56 +114,32 @@ def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
     """Create Chroma vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
     
-    # Create a temporary directory with ASCII-only path
-    temp_base = os.path.join(tempfile.gettempdir(), "chromadb_" + str(uuid.uuid4())[:8])
-    os.makedirs(temp_base, exist_ok=True)
-    
-    try:
-        vectorstore = Chroma.from_documents(
-            documents=text_chunks,
-            embedding=embeddings,
-            persist_directory=temp_base
-        )
-        vectorstore.persist()
-        return vectorstore
-    except Exception as e:
-        if os.path.exists(temp_base):
-            try:
-                import shutil
-                shutil.rmtree(temp_base)
-            except:
-                pass
-        raise e
+    # Use in-memory ChromaDB without persistence and with reduced dimension
+    vectorstore = Chroma.from_documents(
+        documents=text_chunks,
+        embedding=embeddings,
+        collection_metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 80, "hnsw:M": 8}
+    )
+    return vectorstore
 
 def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
     llm = ChatOpenAI(
-        temperature=0.0,  # Set to 0 for fully factual responses
-        model_name="gpt-4"
+        temperature=0.0,
+        model_name="gpt-3.5-turbo",
+        max_tokens=500
     )
     
-    # Custom prompt template
-    prompt_template = """You are a helpful assistant that answers questions based solely on the provided context. 
-    
-    Context: {context}
-    
-    Current conversation:
-    {chat_history}
-    
-    Question: {question}
-    
-    Instructions:
-    1. Only answer with information found in the provided context
-    2. If information is not in the context, say "I don't have enough information to answer that question"
-    3. Keep responses clear, concise, and factual
-    4. Do not mention or reference any document names or sources
-    5. Do not infer or assume information that is not explicitly stated in the context.
-    6. If the question requires interpretation or additional details not found in the context, state that you cannot provide an answer.
-    7. If multiple relevant facts exist in the context, summarize them objectively without adding personal opinions or assumptions.
-    8. Prioritize the most relevant and recent information if multiple similar details exist.
-    9. Structure responses logically, ensuring coherence and readability.
-    
-    Answer:"""
+    # Simplified prompt template
+    prompt_template = """Answer based on the context below. If you're unsure, say "I don't have enough information."
+
+Context: {context}
+
+Chat History: {chat_history}
+
+Question: {question}
+
+Answer:"""
     
     PROMPT = PromptTemplate(
         input_variables=["context", "chat_history", "question"],
@@ -173,17 +149,18 @@ def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
     memory = ConversationBufferMemory(
         memory_key='chat_history',
         return_messages=True,
-        output_key='answer'
+        output_key='answer',
+        max_token_limit=1000
     )
     
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 5}  # Retrieve top 5 most relevant chunks
+            search_kwargs={"k": 3}
         ),
         memory=memory,
         combine_docs_chain_kwargs={"prompt": PROMPT},
-        return_source_documents=False  # Disable source tracking
+        return_source_documents=False
     )
     
     return conversation_chain
@@ -205,7 +182,12 @@ def main():
         st.session_state.vectorstore = None
 
     try:
-        st.set_page_config(page_title="Chat with Documents")
+        st.set_page_config(
+            page_title="Chat with Documents",
+            page_icon="💬",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
         st.header("Chat with your Documents 💬")
         
         # Add debug info section in sidebar
@@ -216,6 +198,14 @@ def main():
             if st.session_state.debug_info:
                 for info in st.session_state.debug_info:
                     st.text(info)
+            
+            # Clear memory button
+            if st.button("Clear Memory"):
+                st.session_state.conversation = None
+                st.session_state.chat_history = None
+                st.session_state.vectorstore = None
+                st.session_state.debug_info = []
+                st.success("Memory cleared!")
             
             st.subheader("Your documents")
             uploaded_files = st.file_uploader(
@@ -230,6 +220,10 @@ def main():
                 # Process documents
                 with st.spinner("Processing documents..."):
                     try:
+                        # Clear previous conversation when new documents are uploaded
+                        st.session_state.conversation = None
+                        st.session_state.chat_history = None
+                        
                         documents = process_documents(uploaded_files)
                         st.session_state.debug_info.append(f"Processed {len(documents)} documents")
                         
