@@ -3,13 +3,14 @@ import os
 import sys
 import tempfile
 import uuid
+import sqlite3
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from docx import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma, FAISS
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
@@ -25,6 +26,12 @@ def check_openai_key():
         st.error("⚠️ OpenAI API key not found. Please set it in your Streamlit secrets or .env file!")
         return False
     return True
+
+def check_sqlite_version():
+    """Check if SQLite version meets ChromaDB requirements"""
+    sqlite_version = sqlite3.sqlite_version_info
+    required_version = (3, 35, 0)
+    return sqlite_version >= required_version
 
 def translate_text_batch(text: str, batch_size: int = 1000) -> str:
     """Translate text in batches while preserving context"""
@@ -110,19 +117,29 @@ def get_text_chunks(documents: List[LangchainDocument]) -> List[LangchainDocumen
     
     return chunks
 
-def get_vectorstore(text_chunks: List[LangchainDocument]) -> Chroma:
-    """Create Chroma vectorstore from document chunks"""
+def get_vectorstore(text_chunks: List[LangchainDocument]):
+    """Create vectorstore from document chunks"""
     embeddings = OpenAIEmbeddings()
     
-    # Use in-memory ChromaDB without persistence and with reduced dimension
-    vectorstore = Chroma.from_documents(
-        documents=text_chunks,
-        embedding=embeddings,
-        collection_metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 80, "hnsw:M": 8}
-    )
+    # Check SQLite version and use appropriate vector store
+    if check_sqlite_version():
+        st.session_state.debug_info.append("Using ChromaDB vector store")
+        # Use in-memory ChromaDB without persistence and with reduced dimension
+        vectorstore = Chroma.from_documents(
+            documents=text_chunks,
+            embedding=embeddings,
+            collection_metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 80, "hnsw:M": 8}
+        )
+    else:
+        st.session_state.debug_info.append("Using FAISS vector store (SQLite version < 3.35.0)")
+        # Use FAISS as fallback
+        vectorstore = FAISS.from_documents(
+            documents=text_chunks,
+            embedding=embeddings
+        )
     return vectorstore
 
-def get_conversation_chain(vectorstore: Chroma) -> ConversationalRetrievalChain:
+def get_conversation_chain(vectorstore) -> ConversationalRetrievalChain:
     """Create conversation chain with custom prompt and retrieval settings"""
     llm = ChatOpenAI(
         temperature=0.0,
